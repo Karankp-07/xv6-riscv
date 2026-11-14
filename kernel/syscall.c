@@ -104,6 +104,8 @@ extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
 extern uint64 sys_getmemsize(void);
+extern uint64 sys_checkpoint(void);
+extern uint64 sys_restore(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -132,6 +134,8 @@ static uint64 (*syscalls[])(void) = {
   [SYS_close]   = sys_close,
   [SYS_sync]    = sys_sync,
   [SYS_getmemsize] = sys_getmemsize,
+  [SYS_checkpoint] = sys_checkpoint,
+  [SYS_restore]    = sys_restore,
   // clang-format on
 };
 

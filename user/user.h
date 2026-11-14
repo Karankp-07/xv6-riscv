@@ -26,6 +26,8 @@ int pause(int);
 int uptime(void);
 int sync(void);
 uint64 getmemsize(void);
+int    checkpoint(const char *path);
+int    restore(const char *path);
 
 // ulib.c
 int stat(const char *, struct stat *);

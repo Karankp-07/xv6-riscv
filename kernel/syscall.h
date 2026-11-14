@@ -22,3 +22,5 @@
 #define SYS_close  21
 #define SYS_sync   22
 #define SYS_getmemsize 23
+#define SYS_checkpoint 24
+#define SYS_restore    25
