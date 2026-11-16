@@ -155,6 +155,8 @@ UPROGS=\
 	$U/_hello\
 	$U/_proc_demo\
 	$U/_memtest\
+	$U/_cptest\
+	$U/_restore\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
