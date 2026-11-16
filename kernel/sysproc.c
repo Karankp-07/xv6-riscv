@@ -116,13 +116,3 @@ sys_getmemsize(void)
 {
   return myproc()->sz;
 }
-
-// sys_checkpoint and sys_restore are implemented in kernel/checkpoint.c
-// Stubs declared here to satisfy the linker until that file is complete.
-// (These get overridden by the real definitions once checkpoint.c is linked.)
-uint64 sys_checkpoint(void);
-uint64 sys_restore(void)
-{
-  // Restore engine not yet implemented – returns -1 (ENOSYS).
-  return -1;
-}
