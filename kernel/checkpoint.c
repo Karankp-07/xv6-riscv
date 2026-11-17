@@ -2,10 +2,15 @@
 // Process checkpoint and restore for xv6.
 //
 // sys_checkpoint() serializes the calling process to a file:
-//   header -> trapframe -> pages
+//   header -> trapframe -> pages (each as: 8-byte VA + 4096-byte data)
 //
 // sys_restore() reads that file and replaces the calling process's
 // address space and registers so it resumes where the snapshot was taken.
+//
+// Important: we never put a full 4096-byte page buffer on the kernel stack
+// since the kernel stack is only one page (4096 bytes) itself. For page
+// data we either write directly from the physical address or kalloc() a
+// temporary frame on the heap.
 
 #include "types.h"
 #include "param.h"
@@ -22,7 +27,6 @@
 #include "checkpoint.h"
 
 // Write `len` bytes from kernel buffer `src` into inode `ip` at `*off`.
-// Bumps *off forward so callers can call this sequentially.
 static int
 chk_write(struct inode *ip, uint *off, void *src, uint len)
 {
@@ -45,7 +49,6 @@ chk_read(struct inode *ip, uint *off, void *dst, uint len)
 // sys_checkpoint(const char *path)
 //
 // Saves the calling process to a snapshot file at `path`.
-// The file is created if it doesn't exist, or truncated if it does.
 // Returns 0 on success, -1 on error.
 uint64
 sys_checkpoint(void)
@@ -56,7 +59,6 @@ sys_checkpoint(void)
   uint off = 0;
   uint64 va, num_pages;
   struct xv6_chk_header hdr;
-  struct xv6_chk_page pg;
   int i;
 
   if (argstr(0, path, MAXPATH) < 0)
@@ -68,12 +70,12 @@ sys_checkpoint(void)
     ilock(ip);
     itrunc(ip);
   } else {
-    char parent_path[MAXPATH];
+    char ppath[MAXPATH];
     char name[DIRSIZ];
     struct inode *dp;
 
-    memmove(parent_path, path, MAXPATH);
-    dp = nameiparent(parent_path, name);
+    memmove(ppath, path, MAXPATH);
+    dp = nameiparent(ppath, name);
     if (!dp) {
       end_op();
       return -1;
@@ -86,8 +88,6 @@ sys_checkpoint(void)
       return -1;
     }
     ilock(ip);
-    ip->major = 0;
-    ip->minor = 0;
     ip->nlink = 1;
     iupdate(ip);
     if (dirlink(dp, name, ip->inum) < 0) {
@@ -101,15 +101,13 @@ sys_checkpoint(void)
     iunlockput(dp);
   }
 
-  // Count how many user pages are actually mapped so we can put
-  // the right number in the header before writing any page data.
+  // Count mapped pages first so the header has the right number.
   num_pages = 0;
   for (va = 0; va < p->sz; va += PGSIZE) {
     if (walkaddr(p->pagetable, va) != 0)
       num_pages++;
   }
 
-  // Build the header with process metadata and open file info.
   memset(&hdr, 0, sizeof(hdr));
   hdr.magic     = XV6_CHK_MAGIC;
   hdr.version   = XV6_CHK_VERSION;
@@ -120,57 +118,53 @@ sys_checkpoint(void)
 
   for (i = 0; i < NOFILE; i++) {
     struct file *f = p->ofile[i];
-    if (!f) {
-      hdr.fds[i].valid = 0;
-      continue;
-    }
+    if (!f) { hdr.fds[i].valid = 0; continue; }
     hdr.fds[i].valid    = 1;
     hdr.fds[i].type     = f->type;
     hdr.fds[i].readable = f->readable;
     hdr.fds[i].writable = f->writable;
     hdr.fds[i].off      = f->off;
-    hdr.fds[i].path[0]  = '\0';
   }
 
   if (chk_write(ip, &off, &hdr, sizeof(hdr)) < 0)
     goto err;
 
-  // Save the full trapframe — this captures epc, sp, ra, and all
-  // general-purpose registers exactly as they are at this moment.
   if (chk_write(ip, &off, p->trapframe, sizeof(struct trapframe)) < 0)
     goto err;
 
-  // Walk the page table and dump every mapped user page to disk.
+  // Write each mapped page as: [8-byte VA][4096-byte data].
+  // We pass the physical address directly to writei (user_dst=0 means
+  // it treats the address as a kernel VA, which works because xv6 maps
+  // all physical RAM at its physical address in the kernel page table).
   for (va = 0; va < p->sz; va += PGSIZE) {
     uint64 pa = walkaddr(p->pagetable, va);
     if (pa == 0)
       continue;
 
-    pg.va = va;
-    memmove(pg.data, (void *)pa, PGSIZE);
-
-    if (chk_write(ip, &off, &pg, sizeof(pg)) < 0)
+    if (chk_write(ip, &off, &va, sizeof(uint64)) < 0)
       goto err;
+    if (writei(ip, 0, pa, off, PGSIZE) != PGSIZE)
+      goto err;
+    off += PGSIZE;
   }
 
   iunlockput(ip);
   end_op();
-  printk("checkpoint: saved '%s' (%lld pages)\n", p->name, num_pages);
+  printk("checkpoint: saved '%s' (%ld pages)\n", p->name, num_pages);
   return 0;
 
 err:
   iunlockput(ip);
   end_op();
-  printk("checkpoint: write failed\n");
+  printk("checkpoint: write error\n");
   return -1;
 }
 
 // sys_restore(const char *path)
 //
-// Reads a snapshot and replaces the calling process with it.
-// On success, execution resumes at the saved epc and the restored
-// process sees checkpoint() return 0 (we set a0 = 0 before returning).
-// On failure, the process is killed if its address space was already torn down.
+// Reads a snapshot file and replaces the calling process with it.
+// On success execution resumes at the saved epc and checkpoint() appears
+// to return 0 in the restored process (we set a0 = 0).
 uint64
 sys_restore(void)
 {
@@ -180,8 +174,7 @@ sys_restore(void)
   uint off = 0;
   struct xv6_chk_header hdr;
   struct trapframe saved_tf;
-  struct xv6_chk_page pg;
-  uint64 i;
+  uint64 i, pg_va;
   char *mem;
 
   if (argstr(0, path, MAXPATH) < 0)
@@ -191,51 +184,49 @@ sys_restore(void)
   ip = namei(path);
   if (!ip) {
     end_op();
-    printk("restore: file not found: %s\n", path);
+    printk("restore: not found: %s\n", path);
     return -1;
   }
   ilock(ip);
 
-  if (chk_read(ip, &off, &hdr, sizeof(hdr)) < 0) {
-    printk("restore: failed to read header\n");
+  if (chk_read(ip, &off, &hdr, sizeof(hdr)) < 0)
     goto err;
-  }
 
   if (hdr.magic != XV6_CHK_MAGIC) {
-    printk("restore: not a valid checkpoint file (bad magic)\n");
+    printk("restore: not a valid checkpoint file\n");
     goto err;
   }
-
   if (hdr.version != XV6_CHK_VERSION) {
-    printk("restore: unsupported snapshot version %d\n", hdr.version);
+    printk("restore: unsupported version %d\n", hdr.version);
     goto err;
   }
 
-  if (chk_read(ip, &off, &saved_tf, sizeof(saved_tf)) < 0) {
-    printk("restore: failed to read trapframe\n");
+  if (chk_read(ip, &off, &saved_tf, sizeof(saved_tf)) < 0)
     goto err;
-  }
 
-  // Free the current address space before rebuilding it from the snapshot.
+  // Free the current address space before rebuilding from the snapshot.
   if (p->sz > 0)
     uvmunmap(p->pagetable, 0, p->sz / PGSIZE, 1);
   p->sz = 0;
 
-  // Allocate a fresh physical page for each saved page and map it in.
+  // For each saved page: read the VA, kalloc a frame, read the data into it,
+  // then map it. We use kalloc here so the page data never sits on the kernel
+  // stack (which is only 4096 bytes — same size as one page).
   for (i = 0; i < hdr.num_pages; i++) {
-    if (chk_read(ip, &off, &pg, sizeof(pg)) < 0) {
-      printk("restore: failed reading page %lld\n", i);
+    if (chk_read(ip, &off, &pg_va, sizeof(uint64)) < 0)
       goto err_no_as;
-    }
 
     mem = kalloc();
-    if (!mem) {
-      printk("restore: out of memory at page %lld\n", i);
+    if (!mem)
+      goto err_no_as;
+
+    if (readi(ip, 0, (uint64)mem, off, PGSIZE) != PGSIZE) {
+      kfree(mem);
       goto err_no_as;
     }
-    memmove(mem, pg.data, PGSIZE);
+    off += PGSIZE;
 
-    if (mappages(p->pagetable, pg.va, PGSIZE, (uint64)mem,
+    if (mappages(p->pagetable, pg_va, PGSIZE, (uint64)mem,
                  PTE_R | PTE_W | PTE_X | PTE_U) < 0) {
       kfree(mem);
       goto err_no_as;
@@ -244,9 +235,8 @@ sys_restore(void)
 
   p->sz = hdr.sz;
 
-  // Restore registers but keep the live kernel-side trapframe fields.
-  // Those four fields belong to the current kernel execution context,
-  // not the saved user process, so we must not overwrite them.
+  // Restore registers but keep the live kernel-side trapframe fields —
+  // those belong to the current kernel execution context, not the saved user.
   uint64 k_satp   = p->trapframe->kernel_satp;
   uint64 k_sp     = p->trapframe->kernel_sp;
   uint64 k_trap   = p->trapframe->kernel_trap;
@@ -259,7 +249,7 @@ sys_restore(void)
   p->trapframe->kernel_trap   = k_trap;
   p->trapframe->kernel_hartid = k_hartid;
 
-  // Make checkpoint() appear to return 0 in the restored process.
+  // The restored process should see checkpoint() return 0 (success).
   p->trapframe->a0 = 0;
 
   iunlockput(ip);
@@ -273,10 +263,10 @@ err:
   return -1;
 
 err_no_as:
-  // The address space is gone so we can't safely continue.
+  // Address space is gone, can't continue safely.
   iunlockput(ip);
   end_op();
-  printk("restore: fatal error, killing process\n");
+  printk("restore: fatal, killing process\n");
   p->killed = 1;
   return -1;
 }
