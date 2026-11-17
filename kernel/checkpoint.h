@@ -6,22 +6,21 @@
 //   [ struct trapframe ]        saved user register state
 //   [ xv6_chk_page x N ]       one entry per mapped user page
 //
-// Each xv6_chk_page is stored as:
-//   8 bytes  – virtual address (page-aligned)
-//   4096 bytes – raw page content
-// We don't use a struct for this in the kernel to avoid putting 4KB on the
-// kernel stack (which is only one page).
+// Each page entry is stored sequentially on disk as:
+//   8 bytes: virtual address (page-aligned)
+//   4096 bytes: raw page content
+// We avoid a 4KB struct definition here so nothing large is ever placed
+// on the kernel stack, which is limited to a single 4096-byte page.
 
 #ifndef CHECKPOINT_H
 #define CHECKPOINT_H
 
 #include "types.h"
 
-#define XV6_CHK_MAGIC   0x43365658   // "XV6C"
+#define XV6_CHK_MAGIC   0x43365658   // Magic identifier for XV6 checkpoint files
 #define XV6_CHK_VERSION 1
 
-// Open file descriptor state saved per slot.
-// path is left empty for now — full path recovery is a future improvement.
+// Saved state for an open file descriptor slot.
 struct xv6_chk_fd {
   int  valid;
   int  type;
@@ -30,7 +29,7 @@ struct xv6_chk_fd {
   uint off;
 };
 
-// Header written at byte 0 of every snapshot file.
+// Fixed-size header placed at offset 0 in every snapshot file.
 struct xv6_chk_header {
   uint32 magic;
   uint32 version;
@@ -38,7 +37,7 @@ struct xv6_chk_header {
   char   name[16];
   uint64 sz;
   uint64 num_pages;
-  struct xv6_chk_fd fds[16];   // one slot per NOFILE (16)
+  struct xv6_chk_fd fds[16];   // File descriptor table entries (NOFILE = 16)
 };
 
 #endif // CHECKPOINT_H

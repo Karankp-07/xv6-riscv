@@ -209,9 +209,9 @@ sys_restore(void)
     uvmunmap(p->pagetable, 0, p->sz / PGSIZE, 1);
   p->sz = 0;
 
-  // For each saved page: read the VA, kalloc a frame, read the data into it,
-  // then map it. We use kalloc here so the page data never sits on the kernel
-  // stack (which is only 4096 bytes — same size as one page).
+  // For each saved page, read the VA, kalloc a frame, read data into it,
+  // then map it into user space. We use kalloc here so the page data
+  // is never placed on the kernel stack, which is limited to 4096 bytes.
   for (i = 0; i < hdr.num_pages; i++) {
     if (chk_read(ip, &off, &pg_va, sizeof(uint64)) < 0)
       goto err_no_as;
@@ -235,8 +235,8 @@ sys_restore(void)
 
   p->sz = hdr.sz;
 
-  // Restore registers but keep the live kernel-side trapframe fields —
-  // those belong to the current kernel execution context, not the saved user.
+  // Restore user registers while keeping the live kernel context fields intact.
+  // Those fields belong to the current CPU and execution state, not the saved process.
   uint64 k_satp   = p->trapframe->kernel_satp;
   uint64 k_sp     = p->trapframe->kernel_sp;
   uint64 k_trap   = p->trapframe->kernel_trap;
@@ -249,13 +249,14 @@ sys_restore(void)
   p->trapframe->kernel_trap   = k_trap;
   p->trapframe->kernel_hartid = k_hartid;
 
-  // The restored process should see checkpoint() return 0 (success).
-  p->trapframe->a0 = 0;
+  // The restored process receives 1 from checkpoint() so it can distinguish
+  // a resume from the initial save (similar to setjmp/longjmp in Unix).
+  p->trapframe->a0 = 1;
 
   iunlockput(ip);
   end_op();
   printk("restore: resumed '%s' at epc=0x%lx\n", hdr.name, p->trapframe->epc);
-  return 0;
+  return 1;
 
 err:
   iunlockput(ip);

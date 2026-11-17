@@ -23,6 +23,28 @@ main(void)
   dup(0); // stdout
   dup(0); // stderr
 
+  // Check if an active process snapshot exists from a previous session
+  int chk_fd = open("snap.chk", O_RDONLY);
+  if (chk_fd >= 0) {
+    close(chk_fd);
+    printf("init: found saved snapshot 'snap.chk', auto-resuming process\n");
+    pid = fork();
+    if (pid < 0) {
+      printf("init: fork failed during auto-restore\n");
+    } else if (pid == 0) {
+      char *r_argv[] = {"restore", "snap.chk", 0};
+      exec("restore", r_argv);
+      printf("init: exec restore failed\n");
+      exit(1);
+    } else {
+      for (;;) {
+        wpid = wait((int *)0);
+        if (wpid == pid || wpid < 0)
+          break;
+      }
+    }
+  }
+
   for (;;) {
     printf("init: starting sh\n");
     pid = fork();
